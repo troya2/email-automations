@@ -1,0 +1,102 @@
+#! /usr/bin/ruby
+
+require 'net/imap'
+require 'optparse'
+
+# Default values
+username = nil
+password = nil
+server = nil
+port = 993
+use_ssl = true
+days = 30
+trash_folder = 'Trash'  # Modify this if the folder name is different
+
+# Parse command-line options
+OptionParser.new do |opts|
+  opts.banner = "Usage: #{ARGV[0]} [options]"
+
+  opts.on('-u', '--username USERNAME', 'IMAP username') do |u|
+    username = u
+  end
+
+  opts.on('-p', '--password PASSWORD', 'IMAP password') do |p|
+    password = p
+  end
+
+  opts.on('-s', '--server SERVER', 'IMAP server') do |s|
+    server = s
+  end
+
+  opts.on('-t', '--port PORT', 'IMAP port') do |t|
+    port = t
+  end
+
+  opts.on('-i', '--insecure', 'Disable IMAP ssl') do
+    use_ssl = false
+  end
+
+  opts.on('-d', '--days DAYS', 'Minimum age in days') do |d|
+    days = d
+  end
+
+  opts.on('-f', '--folder FOLDER', 'Destination folder for archiving') do |f|
+    trash_folder = f
+  end
+end.parse!
+
+# Validate command-line options
+if username.nil? || password.nil? || server.nil?
+  puts 'Please provide username, password, and server options.'
+  exit 1
+end
+
+# Connect to the IMAP server
+imap = Net::IMAP.new(server, port, use_ssl)
+imap.login(username, password)
+
+# Select the mailbox (e.g., 'INBOX')
+mailbox = 'INBOX'
+imap.select(mailbox)
+
+# Search for unread, unflagged messages older than 30 days
+date_threshold = (Time.now - (days * 24 * 60 * 60)).strftime('%d-%b-%Y')
+
+message_ids = begin
+  imap.search(['UNFLAGGED', 'UNSEEN', 'BEFORE', date_threshold])
+rescue
+  found_message_ids = imap.search(['UNSEEN', 'BEFORE', date_threshold])
+  message_flags = imap.fetch(found_message_ids, 'FLAGS')
+  message_flags.reject { |flags| flags.attr['FLAGS'].include?(:Flagged) }.map(&:seqno)
+end
+
+puts "Trashing #{message_ids.count} unflagged unread messages over #{days} days old"
+
+# Move the messages to the Trash folder and mark them as read
+unless message_ids.empty?
+  # Check if the Trash folder exists and create it if needed
+  unless imap.list('', trash_folder)
+    imap.create(trash_folder)
+  end
+
+  # Mark the messages as read in the Inbox
+  imap.store(message_ids, "+FLAGS", [:Seen])
+
+  # Move the messages to the Trash folder
+  imap.copy(message_ids, trash_folder)
+
+  # Set the \Deleted flag to mark the messages for deletion in the Inbox
+  imap.store(message_ids, "+FLAGS", [:Deleted])
+
+  # Permanently remove the messages marked as deleted
+  imap.expunge
+end
+
+# Disconnect from the IMAP server
+begin
+  imap.logout
+rescue
+  # Ignore logout errors - iCloud isn't being nice...
+end
+
+imap.disconnect
